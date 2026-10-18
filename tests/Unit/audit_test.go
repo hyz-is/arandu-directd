@@ -3,7 +3,6 @@ package unit_test
 import (
 	"go/ast"
 	"go/build/constraint"
-	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,27 +20,19 @@ import (
 // opened a socket would pass every check the installer runs.
 //
 // The package is therefore the only place that check can happen, and this is
-// it. These tests read this package's own Go files as syntax and hold four
-// properties:
+// it. These tests read this package's own Go files as syntax and hold that what
+// arandu.mod.toml declares is what the code does.
 //
-//  1. every exported Service method calls Authorize before it reaches the
-//     generated query;
-//  2. the tenant comes from the Grant, and nothing a request carried is read as
-//     one;
-//  3. the Model remains tenant-scoped and CRUD does not grow a second data path;
-//  4. what arandu.mod.toml declares is what the code does.
-//
-// The fifth is held where the routes exist rather than here, because a prefix
-// arrives through configuration and syntax cannot follow it:
-// TestNoRouteLandsInTheFrameworkNamespace, in tests/Feature/routes_test.go,
-// registers the module and reads the table back.
+// The skeleton this package's shape comes from also audits a Service that reaches
+// a Model only after a Grant, and a tenant that only ever comes from one. This
+// package has neither: it reads no table and serves no route, so there is no
+// row a Grant could guard, and the capability audit below is what says so --
+// it fails the day a table or a socket appears without the manifest saying so.
 //
 // What these tests do not reach is worth as much as what they do. They read
-// syntax: a call hidden behind an interface, a wrapper around the named Model
-// entry point, and anything reached by reflection are all invisible to them. A
-// green run means no such thing was found written down, not that none exists.
-// What is absolute is what the compiler holds alongside them -- a Model terminal
-// with no Grant in its call does not compile.
+// syntax: a call hidden behind an interface and anything reached by reflection
+// are invisible to them. A green run means no such thing was found written
+// down, not that none exists.
 
 // buildable reports whether the compiler ever reads this file.
 //
@@ -78,13 +69,29 @@ func buildable(file *ast.File) bool {
 // application has -- which is the same defect as declaring one nothing uses,
 // pointed the other way.
 //
-// The package carries no command today, and the rule is here rather than in the
-// commit that adds one: a capability audit that grows a hole the first time
-// somebody needs it is an audit whose answer depends on who ran it.
+// The same holds for the internal packages only the commands and the
+// generator import -- internal/catalog (the documentation crawler),
+// internal/smoke (the capped real run) and internal/gen: Go refuses an
+// import of an internal package from outside this module, so no application
+// can link them. TestTheCommandsAreWhereTheFilesAre below holds that the
+// root package imports none of them, so the exemption hides nothing.
 //
 // Every rule in this file reads what the installer links, and this is where
 // that is decided once.
-func linked(file *ast.File) bool { return file.Name.Name != "main" }
+func linked(source parsedGoFile) bool {
+	if source.file.Name.Name == "main" {
+		return false
+	}
+	for _, dir := range unlinkedDirs {
+		if strings.HasPrefix(source.path, dir) {
+			return false
+		}
+	}
+	return true
+}
+
+// unlinkedDirs are the internal packages no application can link.
+var unlinkedDirs = []string{"internal/catalog/", "internal/smoke/", "internal/gen/"}
 
 // auditedFiles is every Go file an application that installs this package
 // compiles into its binary.
@@ -93,7 +100,7 @@ func auditedFiles(t *testing.T) []parsedGoFile {
 
 	out := []parsedGoFile{}
 	for _, source := range productionGoFiles(t, packageRoot(t)) {
-		if buildable(source.file) && linked(source.file) {
+		if buildable(source.file) && linked(source) {
 			out = append(out, source)
 		}
 	}
@@ -103,187 +110,6 @@ func auditedFiles(t *testing.T) []parsedGoFile {
 		t.Fatal("no buildable Go file was found, so everything below would pass by having nothing to read")
 	}
 	return out
-}
-
-// selectorName is the trailing name of a selector, or the name of an
-// identifier.
-func selectorName(expression ast.Expr) string {
-	switch expression := expression.(type) {
-	case *ast.SelectorExpr:
-		return expression.Sel.Name
-	case *ast.Ident:
-		return expression.Name
-	}
-	return ""
-}
-
-// calledName is the trailing name of whatever a call names, so a call can be
-// recognised without resolving what it is called on.
-func calledName(call *ast.CallExpr) string {
-	return selectorName(call.Fun)
-}
-
-// firstCallTo is where a body first calls something by this name.
-func firstCallTo(body *ast.BlockStmt, name string) token.Pos {
-	found := token.NoPos
-	ast.Inspect(body, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok || calledName(call) != name {
-			return true
-		}
-		if found == token.NoPos || call.Pos() < found {
-			found = call.Pos()
-		}
-		return true
-	})
-	return found
-}
-
-// TestEveryServiceMethodAuthorizesBeforeTheModel holds the mandatory path on
-// every exported use case rather than on the three that exist today.
-//
-// A nil-database denial test proves the closed path. This syntax audit is its
-// twin for an allowed path: Model construction is visible in the method body,
-// and moving it above Authorize fails even when no terminal is executed.
-func TestEveryServiceMethodAuthorizesBeforeTheModel(t *testing.T) {
-	t.Parallel()
-
-	audited := 0
-	for _, source := range auditedFiles(t) {
-		for _, declaration := range source.file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil || receiverType(function) != "DirectdService" ||
-				!function.Name.IsExported() {
-				continue
-			}
-			audited++
-
-			decided := firstCallTo(function.Body, "Authorize")
-			reach := firstModelReach(function.Body)
-			if decided == token.NoPos {
-				t.Errorf("%s: %s never calls security.Authorize, so no Policy decided whether the Model may run",
-					source.path, function.Name.Name)
-			}
-			if reach == token.NoPos {
-				t.Errorf("%s: %s never reaches the generated query, so this audit found no data boundary to order",
-					source.path, function.Name.Name)
-			}
-			if decided != token.NoPos && reach != token.NoPos && decided > reach {
-				t.Errorf("%s: %s reaches the Model before security.Authorize",
-					source.path, function.Name.Name)
-			}
-		}
-	}
-	if audited == 0 {
-		t.Fatal("no exported DirectdService method was found, so this test proved nothing")
-	}
-}
-
-// firstModelReach is where a Service first constructs the generated query or
-// calls a promoted write terminal. Directds itself counts: moving only its
-// construction before Authorize is the mutation this audit exists to reject.
-func firstModelReach(body *ast.BlockStmt) token.Pos {
-	terminals := map[string]bool{
-		"Save": true, "Delete": true, "Restore": true, "Touch": true,
-	}
-	found := token.NoPos
-	ast.Inspect(body, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		name := calledName(call)
-		if name != "Directds" && !terminals[name] {
-			return true
-		}
-		if found == token.NoPos || call.Pos() < found {
-			found = call.Pos()
-		}
-		return true
-	})
-	return found
-}
-
-// requestAccessors are the ways a value that arrived with the request is read.
-// A tenant taken through any of them is a tenant the caller chose.
-var requestAccessors = map[string]bool{
-	"Param":         true,
-	"Query":         true,
-	"Input":         true,
-	"FormValue":     true,
-	"PostFormValue": true,
-	"PathValue":     true,
-	"Cookie":        true,
-	"Get":           true,
-}
-
-// TestNoTenantIsReadOutOfTheRequest is the rule with no exception in it. A
-// tenant the client can name is a client who chooses whose rows they read, and
-// every other check in the package passes while it happens.
-func TestNoTenantIsReadOutOfTheRequest(t *testing.T) {
-	t.Parallel()
-
-	for _, source := range auditedFiles(t) {
-		ast.Inspect(source.file, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !requestAccessors[selector.Sel.Name] {
-				return true
-			}
-			for _, argument := range call.Args {
-				literal, ok := argument.(*ast.BasicLit)
-				if !ok || literal.Kind != token.STRING {
-					continue
-				}
-				if strings.Contains(strings.ToLower(literal.Value), "tenant") {
-					t.Errorf("%s: %s(%s) reads a tenant out of the request; it comes from the Grant, which came from the session",
-						source.path, selector.Sel.Name, literal.Value)
-				}
-			}
-			return true
-		})
-	}
-}
-
-// TestTheServiceWritesTenantOnlyFromTheGrant holds the write half of tenant
-// isolation. The proposed value is policy input; the value persisted after
-// Authorize must take TenantID directly from data.Tenant(g).
-func TestTheServiceWritesTenantOnlyFromTheGrant(t *testing.T) {
-	t.Parallel()
-
-	audited := 0
-	for _, source := range auditedFiles(t) {
-		for _, declaration := range source.file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil || receiverType(function) != "DirectdService" {
-				continue
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				assignment, ok := node.(*ast.AssignStmt)
-				if !ok {
-					return true
-				}
-				for i, target := range assignment.Lhs {
-					if i >= len(assignment.Rhs) || selectorName(target) != "TenantID" {
-						continue
-					}
-					audited++
-					call, ok := assignment.Rhs[i].(*ast.CallExpr)
-					if !ok || calledName(call) != "Tenant" {
-						t.Errorf("%s: %s writes TenantID from something other than data.Tenant(g)",
-							source.path, function.Name.Name)
-					}
-				}
-				return true
-			})
-		}
-	}
-	if audited == 0 {
-		t.Fatal("no Service tenant assignment was found, so this test proved nothing")
-	}
 }
 
 // capabilities is what arandu.mod.toml declares, and what the code does, under
@@ -398,8 +224,8 @@ func declaredCapabilities(t *testing.T) capabilities {
 
 // usedCapabilities is what the code actually does, by syntax.
 //
-// It reads calls rather than imports, for the reason the manifest gives: this
-// package imports net/http for a method constant and a request type, and an
+// It reads calls rather than imports: a package that registers routes
+// imports net/http for a method constant and a request type, and an
 // import says nothing about whether anything leaves the process.
 func usedCapabilities(files []parsedGoFile) capabilities {
 	var used capabilities
@@ -450,6 +276,42 @@ func usedCapabilities(files []parsedGoFile) capabilities {
 		})
 	}
 	return used
+}
+
+// TestTheCommandsAreWhereTheFilesAre holds the other side of linked: the
+// files left out of the audit are the commands and the internal packages
+// only they import, those are where files are read and written, and the
+// package an application links imports none of them.
+func TestTheCommandsAreWhereTheFilesAre(t *testing.T) {
+	t.Parallel()
+
+	var unlinked []parsedGoFile
+	for _, source := range productionGoFiles(t, packageRoot(t)) {
+		if linked(source) {
+			for _, imported := range source.file.Imports {
+				path := strings.Trim(imported.Path.Value, `"`)
+				for _, dir := range unlinkedDirs {
+					if path == "github.com/hyz-is/arandu-directd/"+strings.TrimSuffix(dir, "/") {
+						t.Errorf("%s imports %s, which the audit skips as unlinked", source.path, path)
+					}
+				}
+			}
+			continue
+		}
+		unlinked = append(unlinked, source)
+		if !strings.HasPrefix(source.path, "cmd/") && !strings.HasPrefix(source.path, "internal/") {
+			t.Errorf("%s is a main package outside cmd/ and internal/, and the audit skips it", source.path)
+		}
+	}
+	if len(unlinked) == 0 {
+		t.Fatal("no command was found")
+	}
+	if !usedCapabilities(unlinked).filesystem {
+		t.Error("the commands touch no file, so their exemption is not what keeps filesystem = false honest")
+	}
+	if usedCapabilities(auditedFiles(t)).filesystem {
+		t.Error("a linked file reads or writes a file")
+	}
 }
 
 // standardImports maps the local name of every standard library import to the
