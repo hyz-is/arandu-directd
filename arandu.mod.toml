@@ -6,16 +6,22 @@
 # four lines below worth reading before installing anything.
 
 name = "hyz-is/directd"
-framework = ">= 0.56"
+framework = ">= 0.57"
 profiles = ["conventional", "performance"]
 
 [permissions]
-# It answers requests and reads its own rows. Nothing leaves the process.
-network = false
-# It keeps no state outside the database.
+# It calls the Direct Data API (https://apiv3.directd.com.br) over HTTPS, one
+# GET per query, with the token in the query string as the API requires. Every
+# such call is billed to the token's owner. Nothing else leaves the process.
+# cmd/directd-catalog reads the public documentation and cmd/directd-smoke
+# makes capped real calls; both are programs an application never links.
+network = true
+# It reads and writes no file. cmd/directd-smoke reads the token file and
+# writes redacted answers, and cmd/directd-catalog writes the catalogue; an
+# application never links either.
 filesystem = false
 # It runs no other program.
 exec = false
-# module.go owns the directds table, so whoever installs this has to run
-# `aru migrate`. Declaring it is how they find that out before deploying.
-migrations = true
+# It owns no table. Balance, holds and remembered results live in the
+# application, behind the Ledger and Dedupe interfaces.
+migrations = false
