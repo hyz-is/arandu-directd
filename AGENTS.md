@@ -1,15 +1,55 @@
-# Working on Direct Data
+# Working on Arandu Direct Data
 
-This is an Arandu package: one entity with an embedded Hesape Model, one policy
-that decides about it, one service that owns the database handle, and the routes
-that reach them.
-It is a Go module somebody `go get`s and registers by hand in their own
-`bootstrap/app.go`, which is the whole difference from working in an
-application. There is no service provider, no container and no discovery — if a
-line of wiring is not written in the installer's repository, it does not happen.
+This is an Arandu package: a Go client for the Direct Data API covering every
+API of its public catalogue. It returns evidence about each query -- what was
+asked, when, at what price, what the source said, and the data, typed -- and
+decides nothing. It is a Go module somebody `go get`s and wires by hand in
+their own `bootstrap/app.go`; there is no service provider, no container and
+no discovery.
 
 Read `.agents/skills/` before writing code. Each skill is a procedure, and the
 one you need is named by the situation you are in.
+
+## The rules
+
+A change that breaks one is not merged.
+
+1. **No real call, ever, from a test or a session.** Every Direct Data query
+   is billed to the token's owner. Tests talk to an `httptest` double and to
+   nothing else. `cmd/directd-smoke` is the one program that queries the real
+   API; it is run by the owner, or with the owner's written authorization and
+   spend cap, never by an assistant on its own initiative.
+2. **The documentation is read, not the API.** `cmd/directd-catalog` reads the
+   public documentation (`directd.com.br/central-de-ajuda/apis/...`) and
+   refuses `apiv3.directd.com.br` and `app.directd.com.br` by name. A 401, 403
+   or 429 stops it; nothing retries around a refusal.
+3. **Nothing is invented.** A parameter, a field, a price or a status code
+   that the documentation does not state is not written down as if it did. A
+   page that cannot be read leaves its catalogue entry `incomplete` with the
+   reason. The undocumented parts (resultadoId values, callback
+   authentication, the callback URL parameter) are configuration the
+   application fills, refused until it does.
+4. **Evidence, never decisions.** No result field, function or type says
+   approved, rejected, regular, trusted or risky. `tests/Unit/decision_test.go`
+   walks the hand-written source and the `Result` type. The generated types
+   carry Direct Data's own keys, which are data.
+5. **Every query is metered.** A call without a `Ledger` is refused. The
+   price is held before the request, settled only for a billable outcome
+   (terms clause 2.5) and released otherwise. An invalid document, an
+   exhausted budget, an open breaker and a dedupe hit make no request.
+6. **The tenant comes from the application.** The package never reads a
+   request, a path, a header or a body to find one; the application builds the
+   `Meter` from an authorized Grant.
+7. **The token never prints.** `Token` redacts itself everywhere; the URL is
+   stripped from transport errors; redirects are refused; logs carry the
+   masked document only.
+8. **Generated code is generated.** `zz_catalog_*.go` and the README's API
+   table come from `catalog/catalog.json` through `go generate ./...`;
+   `tests/Unit/catalog_test.go` fails when they drift.
+9. **Fixtures are synthetic.** Documents with valid check digits that belong
+   to nobody known, names that say SINTETICA, `example.invalid` addresses. No
+   real person, company, plate or answer in a test, an example or a log line.
+10. **Go only.** No Python, no Node, not in a gate, a generator or a crawler.
 
 ## The gates
 
@@ -17,164 +57,62 @@ Nothing is finished until all four exit zero.
 
 ```sh
 export GOWORK=off
-gofmt -l $(find . -name '*.go' -not -path '*/testdata/*' -not -name '*.kyse.go')
+test -z "$(gofmt -l $(find . -name '*.go' -not -path '*/testdata/*'))"
 go build ./...
 go vet ./...
-go test -race ./...
+go test -race -count=1 ./...
 ```
 
-`GOWORK=off` is not borrowed from somewhere else, and here it is not a
-preference either. This checkout may sit beside a Go workspace that lists the
-framework repositories and does not list this one; when it does, every command
-above fails before it compiles anything:
-
-```
-pattern ./...: directory prefix . does not contain modules listed in go.work
-or their selected dependencies
-```
-
-With the workspace off, the module resolves the framework version in `go.mod` —
-which is what CI compiles against, and what somebody's `go get` will get.
-
-Both filters on `gofmt` are load-bearing in the toolchain even where this
-repository has nothing for them to skip: `gofmt` is the only tool in the chain
-that ignores build tags, and `testdata/` is where a fixture is allowed to be
-invalid on purpose.
-
-`aru doctor` is not one of the gates, and running it here costs a minute and
-answers nothing:
-
-```
-this is not an Arandu project: no go.mod, main.go and arandu.toml together.
-Run it from inside a project, or create one with `aru new`
-```
-
-It exits 1. It reads applications, and this is a library.
-
-It does not read this one after it is installed either, and that is why
-`tests/Unit/audit_test.go` exists. The doctor walks the application's own tree,
-skips `vendor/`, and opens the one `arandu.mod.toml` at its root; it never loads
-a dependency. So `tenant-from-request`, `system-grant-without-tenant` and
-`permission-not-declared` never see a line of an installed package, and whatever
-this one must prove about itself it proves in its own suite or nowhere.
+`GOWORK=off` because this checkout may sit beside a Go workspace that does not
+list it. On a shared workstation, `GOFLAGS=-p=2` keeps the build from competing
+with everything else for memory. `aru doctor` reads applications, not
+libraries; `tests/Unit/audit_test.go` compares `arandu.mod.toml` with what the
+code calls instead.
 
 ## What this repository holds
 
-| | measured with |
-| --- | --- |
-| 7 Go files, one per role and one generated, all in one package at the root | `grep -l '^package directd' *.go` |
-| 6 test files, 44 tests | `find tests -name '*_test.go'` · `go test -count=1 ./... -v \| grep -c '^--- PASS'` |
-| 3 routes | `grep -c 'r.Action' module.go` |
-| 5 actions the policy answers about | `grep -cE '^\t[A-Za-z]+ security.Action = ' policy.go` |
-| 2 direct dependencies, both under `arandu-io` | `go list -m -f '{{if and (not .Indirect) (not .Main)}}{{.Path}} {{.Version}}{{end}}' all` |
-
-The layout is by role rather than by layer, so the package reads top to bottom:
-
 ```
-module.go         registration, routes, handlers and migrations
-config.go         what the application passes in
-model.go          the entity, its table, its own rules, and what it may answer with
-DirectdQuery.go  the query on that table, generated by aru model:build
-policy.go         who may do what
-service.go        validation, authorization and persistence with the Grant
-views.go          the files the application takes ownership of
+module.go       foundation.Module: Name, Routes (none)
+config.go       Config, Validate, WithDefaults
+client.go       Client, New, Request, Query, Check
+async.go        QueryAsync, Ticket, ParseCallback, CompleteAsync, verifiers
+meter.go        Ledger, Dedupe, Meter, MemoryLedger, MemoryDedupe
+outcome.go      Outcome, Classify, Billable
+result.go       Result, MetaData, As
+product.go      Product, Param, roles, DefaultProducts
+document.go     CPF/CNPJ checking and masking (arandu-br)
+redact.go       Redact
+breaker.go      the circuit breaker
+token.go        Token
+flex.go         Text, Number, Flag
+zz_catalog_*.go generated: products, response types, per-API methods
+catalog/        catalog.json, read from the public documentation
+cmd/directd-catalog  the documentation crawler
+cmd/directd-smoke    the capped real run
+internal/catalog     the crawler's parser and fetcher
+internal/gen         the generator (go generate runs internal/gen/run)
+internal/pii         personal-data classes of response keys
+internal/smoke       the smoke run's body
 ```
 
-`directdTable`, in `model.go`, declares the table once: its name, the
-`ManualKey` that says the text primary key is written by the application, and
-the default `tenant_id` scope. `Directds(db)` is generated from it into
-`DirectdQuery.go` and returns the concrete `*DirectdQuery`; that file is never
-edited by hand, and `aru model:build --check` says when it is stale. Its
-terminals return `*Directd` and `DirectdCollection`; keep those pointers
-intact, because copying an embedded Model leaves its `Entity` pointer aimed at
-the original allocation.
+Tests live under `tests/Unit` (`package unit_test`) and `tests/Feature`
+(`package feature_test`), importing the package by its module path.
 
-The rules of the entity itself (invariants, derived values, transitions that
-change only its own fields) live in the custom block of `model.go`, and they
-are pure. The service holds none of them: it validates the request, asks the
-policy for a Grant, calls those rules and saves with the Grant. `Resource` and
-`Collection` are the deliberate response snapshot boundary.
+## What does not exist here, on purpose
 
-## What does not exist here
-
-Reaching for one of these is the most common way to write a package that is
-rejected in review. None of them is missing by accident.
-
-| A model reaches for | What is here instead |
+| A change reaches for | What is here instead |
 | --- | --- |
-| a service provider, a container, a `Register()` that discovers things | `New(cfg, db, sessions)`, called by hand in the installer's `bootstrap/app.go`. Everything the package touches is a parameter |
-| a global `DB`, an `init()` that opens a connection | the `*data.DB` handed to `New`. A package that opened its own connection would be a package the application cannot point at a test database |
-| a CRUD Repository beside the Model | `Directds(db)`, reached only by `DirectdService` after `security.Authorize` |
-| a tenant read from the path, the body, the query or a header | `data.Tenant(g)`, from the Grant, which came from the session |
-| a permit-all branch in the policy "for now" | nothing. The policy denies, and an action is opened by writing the rule that opens it |
-| an `interface{}` config, a map of options, an env var read at call time | the typed `Config` struct, validated by `New` |
-| a `panic` on bad wiring | an `error` from `New`. A wiring mistake found at boot costs one restart |
-| a third dependency | an argument, first. This module is imported into other people's builds |
-| a command of its own that copies files into a project | `Publishes()`, which declares a tagged tree and nothing more. `aru vendor:publish` asks the application which modules it registered and writes what each one declares, so one command serves every installed package instead of one command per package |
-
-## The four properties
-
-These are the reason the package is shaped the way it is. A change that breaks
-one of them is not merged, whatever else it improves. `tests/Unit/policy_test.go`
-checks all four against the code.
-
-1. **The policy denies by default**, and has no branch that allows an action.
-   `TestThePolicyDeniesEveryActionByDefault` walks every action with an
-   administrator subject and requires
-   `security.ErrForbidden` from each.
-2. **Every Service method authorizes before it reaches the Model.**
-   `TestEveryServiceMethodAuthorizesBeforeTheModel` checks the source, and
-   `TestTheServiceRefusesBeforeReachingTheModel` gives the Service a nil handle
-   so even constructing `Directds` in the wrong order fails.
-3. **The tenant comes from `data.Tenant(g)`**, on every path, read and write.
-   `TestTheTenantComesFromTheGrant` and
-   `TestTheServiceWritesTenantOnlyFromTheGrant` hold both halves.
-4. **Nothing reaches the Model without passing the first two.** The denial
-   suite constructs the Service with a nil database, so a call to
-   `Directds(nil)` would panic. Every refusal it asserts is therefore proof
-   that authorization happened before Model construction.
-
-`policy_test.go` holds those four by calling the code. `tests/Unit/audit_test.go`
-holds the same shape by *reading* it: every exported Service method must call
-`Authorize` before its first `Directds`, every tenant write in the Service
-comes from `data.Tenant(g)`, and no tenant accessor reads request input.
-
-It also compares `arandu.mod.toml` against what the code *calls* —
-`os.WriteFile`, `exec.Command`, `http.Get`, a method named `Migrations` — rather
-than against what it imports, because `net/http` is imported by everything with
-a route and says nothing. Both directions fail: used and not declared, which is
-`permission-not-declared` where the doctor runs it, and declared and not used,
-which is a warning there and a failure here because `go test` has one outcome.
-Adding an outbound call, a file write or a process means declaring it in the
-same commit, and the suite is what says so.
-
-The fifth property is not syntax, so it is held where the routes exist.
-`TestNoRouteLandsInTheFrameworkNamespace`, in `tests/Feature/routes_test.go`,
-registers the module and reads the table back: a prefix arrives through
-configuration, and `/_arandu/` is refused when the application boots — in the
-installer's process, after publication.
-
-What the audit does not reach is written at the top of the file it lives in. It
-reads syntax, so dynamic dispatch, reflection, and wrappers around the named
-seams are invisible to it. A green run means no such thing was found written
-down, not that none exists.
+| an `Approved`, `IsRegular` or `Risk` field on `Result` | the source's data and the `Outcome` of the query; the application decides |
+| a test that "just checks" the real API | the `httptest` double, driven by the catalogue's own examples |
+| a balance, a table or a cache in the package | `Ledger` and `Dedupe`, implemented by the application |
+| a tenant read from the request | the `Meter` the application builds from the Grant |
+| a route that queries a document | nothing; the application's controllers, behind its policies |
+| a guessed resultadoId or callback scheme | `Config.ResultCodes`, `Config.CallbackVerifier`, `Config.CallbackURLParam` |
+| editing `zz_catalog_*.go` by hand | `catalog/catalog.json` and `go generate ./...` |
 
 ## Writing code
 
-Everything in the source is in English: identifiers, doc comments, internal
-comments, error messages, log messages, and the names and messages of tests.
-`pkg.go.dev` publishes the doc comments and its readers are users of this
-package.
-
-Every exported symbol carries a doc comment, and the comment documents the
-symbol and nothing else. Why a signature is what it is belongs there when it is
-a fact about the code — *"the value is held because Go does not build a type
-from a string"* stays. A date, an issue number, a version in progress or the
-name of another repository does not.
-
-Tests go under `tests/`, in a capitalized category directory declaring a
-lowercase external package: `tests/Unit` holds `package unit_test`,
-`tests/Feature` holds `package feature_test`. Both import the package by its
-module path, which is what makes them see exactly what a caller sees. A test
-that genuinely needs something unexported goes beside the code as
-`*_internal_test.go`, and the suffix is how it says so.
+Everything in the source is in English: identifiers, doc comments, comments,
+error and log messages, test names and messages. Every exported symbol carries
+a doc comment that documents the symbol and nothing else. Agent instructions
+live only in this file and in `.agents/skills/`.

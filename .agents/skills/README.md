@@ -3,10 +3,8 @@
 Procedures an assistant follows when working on this package.
 
 They live in `.agents/skills/<name>/SKILL.md`, which is the path the coding
-assistants read from — Cursor, Codex, Cline, Copilot, Gemini CLI, Amp, OpenCode,
-Warp, Zed and the rest all look there. It is one directory rather than a file
-per vendor, so a skill written once is read by whatever this package is being
-written with.
+assistants read from. It is one directory rather than a file per vendor, so a
+skill written once is read by whatever this package is being written with.
 
 Each file opens with frontmatter carrying a `name` and a `description`. The
 `name` has to equal the directory name exactly, or the skill is not loaded. The
@@ -15,46 +13,19 @@ names the situation you are in rather than the topic it covers.
 
 | skill | when it fires |
 | --- | --- |
-| `directd-policy` | opening an action, adding an authorized Model-backed use case, or anything answering 403 |
-| `directd-module` | adding a route, a handler, a config field, a response field or a migration |
+| `directd-module` | changing the client, the meter, the outcomes, the async flow, the catalogue, the generator or a command |
 | `directd-release` | the gates, the manifest, a dependency, a version, a tag |
-| `directd-vault-notes` | writing the note, the gap or the journal entry, when this checkout sits inside the Arandu Obsidian vault |
 | `directd-package` | installing and wiring this package **into an application** |
 
-The last one has a different audience from the other three, and that is on
-purpose: it travels with the package so that an assistant working in somebody
-else's project — the one running `go get` — has the wiring, the migration step
-and the closed policy in front of it instead of guessing.
-
-Its frontmatter says so, under `metadata`, with `audience: app`. That line is
-what `aru skills:sync` reads to copy the skill into an application whose
-`go.mod` requires this package, and no other skill here carries it: an
-application that received the release procedure would follow it.
-
-`directd-vault-notes` fires on a condition rather than on a task: it applies
-only when `MOC-arandu.md`, `plans/cmd/audit-vault/` and `45-modules/` are actually
-beside this checkout. Outside the vault it is inert, and it says so first, so a
-package cloned somewhere else never grows a folder tree imitating one.
+The last one has a different audience, and that is on purpose: it travels with
+the package (`metadata: audience: app`, which `aru skills:sync` reads) so that
+an assistant working in somebody else's project has the wiring, the Meter and
+the cost rules in front of it instead of guessing.
 
 ## Why these exist
 
-The audience of the first three is somebody changing the package. The common
-failure modes are a provider, a container lookup, a hand edit to the generated
-`DirectdQuery.go`, a rule of the entity written into the Service instead of the
-custom block of `model.go`, a handler that loads the session or maps an error to
-a status itself, a CRUD Repository beside the Model, a tenant read from the URL,
-or a Policy branch that returns nil for administrators "for now". None belongs
-here, and the last three are security failures rather than style disagreements.
-
-The package is built to be checked rather than trusted. Its denial tests use a
-nil database, so reaching even the generated query constructor before
-authorization panics. The structural twin reads every exported Service method
-and checks the same order on the allowed path, and reads every handler for the
-subject and the status it must leave to the framework. Running
-`go test -race ./...` exercises all of it.
-
-## Adding your own
-
-A skill in this directory is yours and travels with the repository. Keep it a
-procedure rather than a description: a file that says "read the documentation"
-never changes what anybody does.
+The common failure modes are a test that "quickly checks" the real API (every
+query is billed), a guessed status code or callback scheme written down as
+documented, a verdict field on the result, a query made without a Ledger hold,
+a tenant read from the request, a token printed in a log or an error, and a
+hand edit to a generated file. None belongs here.
