@@ -11,7 +11,9 @@ a release is corrected by another release and never by moving a tag.
 
 ## [Unreleased]
 
-The first release, proposed as v0.1.0. It requires
+## [0.1.0] - 2026-10-18
+
+The first release. It requires
 `github.com/arandu-io/framework` v0.57.1 and `github.com/hyz-is/arandu-br`
 v0.3.0. No test calls Direct Data; the client has not yet been run against the
 live API.
